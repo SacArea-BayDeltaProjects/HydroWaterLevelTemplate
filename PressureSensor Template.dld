@@ -1,0 +1,595 @@
+'For CR1000 or CR6 Series Datalogger
+'Initial date of writing: 20181005
+'program author: Trevor Violette, US Geological Survey
+'This program is designed to collect stage data and find the difference in head between two stations.
+'Use Customize Constants function to tell the master datalogger which port to look for the slave datalogger in.
+'The variable "SlaveCom" is referring to the port that the Master Datalogger uses to communicate with the Slave.
+'CR1000 CANNOT USE ComRF. If using RF radio on CR1000, set radio up to use either the RS232 port or CS I/O. If CS I/O, use ComSDC7.
+'If using CR6 with internal radio, use ComRF. If it's necessary to add other possible links for either system, we can do so.
+
+'Port Selection for Pressure Sensor Data wire: For CR1000, use either C3 or C5. For CR6, use C3 or U5. This made it easier to be consistent with variable names.
+
+'UPDATES:
+
+'20181009 - TAV updated Subroutines "StoreVariables" and "ReadVariables" to have correct sized array for variable "Var". Precompiler missed this VarOutofBounds.
+'               Added SVMAQ table so technicians don't need to scroll through Public table to find values for field sheets. Also updated comments to be more concise with instructions.
+
+Const ProgVers = 2.1
+
+SetStatus ("USRDriveSize",250)
+PreserveVariables
+SequentialMode
+'Declare Constants
+Const BadDataIndicator = NAN
+
+'Start of Constants Customization Section
+Const SlaveCom = ComRF
+'value = ComRS232
+'value = ComSDC7
+'value = ComRF
+'End of Constants Customization Section
+
+
+#If LoggerType = CR6 Then
+Const  PS1Com3 = C3
+Const  PS1Com5 = U5
+Const  PS2Com3 = C3
+Const  PS2Com5 = U5
+#EndIf
+#If LoggerType = CR1000 Then
+Const  PS1Com3 = 3
+Const  PS1Com5 = 5
+Const  PS2Com3 = 3
+Const  PS2Com5 = 5
+#EndIf
+'Declare Public Variables
+Public SiteID As String * 8 'USGS Acronym
+Public SiteNum As String * 18 'USGS assigned station number
+Public ProgramVersion = ProgVers
+Public CRVolts As Float 'Station battery volts
+Public LoggerTemp As Float 'Datalogger temp
+Public PS1Stage As Float 'Calculated Stage from pressure sensor 1
+Public PS2Stage As Float 'Calculated stage from pressure sensor 2
+Public Logger2Stage As Float 'stage from the slave datalogger
+Public StageDiff As Float 'difference between master and slave datalogger's stage
+Public DWSHigher As Boolean 'is the shipping channel at higher stage?
+Public StageEven As Boolean 'are the stages even?
+Public PS1Offset As Float 'Calculated offset between PS1 raw data and actual river stage
+Public PS2Offset As Float 'calculated offset between PS2 raw data and actual river stage
+Public TruePS1Stage As Float 'value used for datalogger to calculate offset between raw data and actual stage
+Public TruePS2Stage As Float 'value used for datalogger to calculate offset between raw data and actual stage
+Public Tech As String * 3 'tech's initials to trigger a sitevisit record to be written
+Public VisitReason As String * 100 'reason for a technician visit
+Public PS1Port As Float 'port that PS1 data is wired to
+Public PS1Addr As Float 'SDI12 Address of PS1
+Public PS2Port As Float 'port PS2 data is wired to
+Public PS2Addr As Float 'SDI12 address of PS2
+Public PS1DataIn As Boolean 'are data coming in from PS1?
+Public PS2DataIn As Boolean 'Are data coming in from PS2?
+Public PS1(2) As Float 'Array to hold raw PS1 data
+Alias PS1(1) = PS1RawDepthFt
+Alias PS1(2) = PS1TempC
+Public PS2(2) As Float 'Array to hold raw PS2 data
+Alias PS2(1) = PS2RawDepthFt
+Alias PS2(2) = PS2TempC
+Public PS1Sn As String * 35 'Serial number of PS1
+Public PS2Sn As String * 35 'Serial Number of PS2
+Dim InitialPS1SN As String * 35 'Used to trigger a flag if PS1 has been changed
+Dim InitialPS2SN As String * 35 'Used to trigger a flag if PS2 has been changed
+Public NewPS1 As Boolean 'Was a new PS1 installed?
+Public NewPS2 As Boolean 'Was a new PS2 installed?
+Public HasModem As Boolean 'Is there a modem installed?
+Public KeepModemOn As Boolean 'Keep modem powered 24/7?
+Public ModemOn As Boolean 'Is the modem on?
+Public CycleModem As Boolean 'Trigger to cycle power to modem
+Public ModemWorks As Boolean 'Is the modem successfully communicating to server?
+Dim ModemScans As Float 'how many times has the modem not been able to communicate to server?
+Dim ModemFail As Boolean 'has the modem failed based on how many times it's scanned?
+Public ModemOffTime As Float 'number of "scans" before the modem is considered failed
+Public IsNClosed As Boolean 'is there a normally closed relay in the system?
+Dim LoggernetAddr As Float 'echo of the neighbor pakbus address, used to know whether the modem is communicating appropriately
+Public LoggernetServer As Float 'used enterable value for the "server" pakbus address
+Public IsSlave As Boolean 'is this the slave logger in the network?
+Public SlavePBAddr As Float
+
+
+Public GetVarResult As Float 'was the "GetVariables" instruction successful?
+Public StoreVariablesFlg As Boolean
+Public PreserveFile As String * 200
+Public GetVariablesFlag As Boolean
+
+Dim rTime(9) 'array to hold real time datalogger values
+Alias rTime(3) = DOM 'alias for Day of Month
+Alias rTime(4) = Hour 'alias for hour
+Alias rTime(5) = Minute 'alias for minute
+Alias rTime(6) = Second 'alias for second
+Alias rTime(7) = MicroSecond 'alias for microseconds
+
+Dim RealSeconds 'datalogger time in seconds
+Dim Mod5Min 'used for 5min triggers
+Dim Mod15Min 'used for 15min triggers
+Dim Mod60Min 'used for 60min triggers
+Dim ModDay 'used for daily triggers
+
+Dim Rec24hrFlag As Boolean 'used to turn on QAQC table
+Dim Rec15MinFlag As Boolean 'used to turn on DataOut Table
+Dim RecDataFlag As Boolean 'used to retry 15min table if it had been missed
+
+'Define Data Tables.
+DataTable (DataOut,Rec15MinFlag,-1) '15min data table
+  OpenInterval
+  CardOut (0,17280)
+  Sample (1,SiteID,String)
+  Sample (1,SiteNum,String)
+  Average (1,PS1Stage,IEEE4,False)
+  Average (1,PS2Stage,IEEE4,False)
+  Average (1,StageDiff,IEEE4,False)
+  Sample (1,DWSHigher,String)
+  Sample (1,StageEven,String)
+  Minimum (1,CRVolts,FP2,False,False)
+  Average (1,LoggerTemp,FP2,False)
+EndTable
+
+DataTable (QAQC,Rec24hrFlag,-1) 'QAQC table, recorded every night at midnight
+  CardOut (0,180)
+  Sample (1,SiteID,String)
+  Sample (1,SiteNum,String)
+  Sample (1,CRVolts,FP2)
+  Sample (1,LoggerTemp,FP2)
+  Sample (1,PS1Stage,IEEE4)
+  Sample (1,PS2Stage,IEEE4)
+  Sample (1,PS1Offset,IEEE4)
+  Sample (1,PS2Offset,IEEE4)
+  Sample (1,PS1Sn,String)
+  Sample (1,PS2Sn,String)
+  Sample (1,NewPS1,String)
+  Sample (1,NewPS2,String)
+  Sample (1,DWSHigher,String)
+  Sample (1,StageEven,String)
+EndTable
+
+DataTable (SiteVisit,True,-1) 'SiteVisit, recorded whenever a tech makes a change
+  CardOut (0,75)
+  Sample (1,SiteID,String)
+  Sample (1,SiteNum,String)
+  Sample (1,CRVolts,FP2)
+  Sample (1,LoggerTemp,FP2)
+  Sample (1,PS1Stage,IEEE4)
+  Sample (1,PS2Stage,IEEE4)
+  Sample (1,PS1Offset,IEEE4)
+  Sample (1,PS2Offset,IEEE4)
+  Sample (1,PS1Sn,String)
+  Sample (1,PS2Sn,String)
+  Sample (1,NewPS1,String)
+  Sample (1,NewPS2,String)
+  Sample (1,DWSHigher,String)
+  Sample (1,StageEven,String)
+  Sample (1,Tech,String)
+  Sample (1,VisitReason,String)
+EndTable
+
+DataTable (SVMAQ,True,1) 'Table to provide easy reference to values needed for SVMAQ field sheets
+  Sample (1,SiteID,String)
+  Sample (1,SiteNum,String)
+  Sample (1,CRVolts,FP2)
+  Sample (1,PS1Stage,FP2)
+  Sample (1,PS2Stage,FP2)
+  Sample (1,PS1Offset,IEEE4)
+  Sample (1,PS2Offset,IEEE4)
+EndTable
+
+'Define Subroutines
+'Subroutine to initialize variables
+Sub Initialize 'Set up station parameters
+  SiteID = "CM79"
+  SiteNum = BadDataIndicator
+  PS1() = NAN
+  PS2() = NAN
+  PS1Port = 3
+  PS1Addr = 0
+  PS2Port = 5
+  PS2Addr = 0
+  TruePS1Stage = NAN
+  TruePS2Stage = NAN
+  IsNClosed = False
+  HasModem = False
+  KeepModemOn = False
+  LoggernetServer = 4094
+  ModemOffTime = 240
+  IsSlave = True
+  SlavePBAddr = 3
+  GetVariablesFlag = True
+EndSub
+
+Sub ModemTimer 'used to turn modem on or off based on "KeepModemOn" variable
+  If IsSlave = True OR HasModem = False Then ExitSub
+  Select Case IsNClosed
+  Case True 'a normally closed relay is present
+    If KeepModemOn = True Then 'keep the modem on 24/7
+    #If LoggerType = CR6 Then
+        SW12(1,0) 'keep switching port off, which keeps relay circuit closed and modem on
+    #EndIf
+    #If LoggerType = CR1000 Then
+      SW12(0)
+    #EndIf
+      ModemOn = True
+    Else 'turn modem on at certain intervals
+      If IfTime (0,60,Min) Then 'at the top of the hour turn modem on
+    #If LoggerType = CR6 Then
+        SW12(1,0) 'turn switching port off, which keeps relay circuit closed and modem on
+    #EndIf
+    #If LoggerType = CR1000 Then
+      SW12(0)
+    #EndIf
+        ModemOn = True
+      EndIf
+      If IfTime (10,60,Min) Then 'at 10min after the top of the hour, turn modem back off
+    #If LoggerType = CR6 Then
+        SW12(1,1) 'turn switching port on, which opens relay circuit
+    #EndIf
+    #If LoggerType = CR1000 Then
+      SW12(1)
+    #EndIf
+        ModemOn = False
+      EndIf
+    EndIf
+  Case False 'a normally closed relay is not present
+    If KeepModemOn = True Then 'keep modem on 24/7
+    #If LoggerType = CR6 Then
+        SW12(1,1) 'keep switching port on
+    #EndIf
+    #If LoggerType = CR1000 Then
+      SW12(1)
+    #EndIf 'keep switching port on
+      ModemOn = True
+    Else 'turn modem on at certain intervals
+      If IfTime (0,60,Min) Then 'at the top of the hour turn modem on
+    #If LoggerType = CR6 Then
+        SW12(1,1) 'keep switching port off, which keeps relay circuit closed and modem on
+    #EndIf
+    #If LoggerType = CR1000 Then
+      SW12(1)
+    #EndIf
+        ModemOn = True
+      EndIf
+      If IfTime (10,60,Min) Then 'at 10min after the top of the hour, turn modem back off
+    #If LoggerType = CR6 Then
+        SW12(1,0) 'keep switching port off, which keeps relay circuit closed and modem on
+    #EndIf
+    #If LoggerType = CR1000 Then
+      SW12(0)
+    #EndIf
+        ModemOn = False
+      EndIf
+    EndIf
+  EndSelect
+EndSub
+
+Sub CycleModemPwr
+  If IsSlave = True OR HasModem = False Then ExitSub
+  If CycleModem = False Then 'if modem power doesn't need to be cycled, exit subroutine
+    ExitSub
+  Else
+    Select Case IsNClosed
+    Case True 'normally closed relay in the system?
+    #If LoggerType = CR6 Then
+        SW12(1,1) 'Turn switching port on to open relay circuit
+    #EndIf
+    #If LoggerType = CR1000 Then
+      SW12(1)
+    #EndIf 'turn sw12 on to open the circuit and turn modem off
+      ModemOn = False
+      CycleModem = False
+    Case False
+    #If LoggerType = CR6 Then
+        SW12(1,0) 'turn switching port/modem off if relay isn't present
+    #EndIf
+    #If LoggerType = CR1000 Then
+      SW12(0)
+    #EndIf 'turn sw12 off to open the circuit and turn modem off
+      ModemOn = False
+      CycleModem = False
+    EndSelect
+  EndIf
+EndSub
+
+Sub ModemCheck 'Check to see if modem is working properly
+  If IsSlave = True OR HasModem = False Then 'if it's the slave logger,  then there's no modem, exit subroutine
+    ExitSub
+  Else
+    LoggernetAddr = Route(LoggernetServer) 'echo the server's PakBus address into variable "LoggernetAddr"
+    If LoggernetAddr = LoggernetServer Then 'if echo matches what the Loggernet server PB address should be, modem is working
+      ModemWorks = True
+      ModemScans = 0
+      ModemFail = False
+    Else 'if echo doesn't match what loggernet server PB address should be, then modem is not working
+      ModemWorks = False
+      ModemScans = ModemScans + 1 'counter for how many times the modem has not communicated with server
+      If ModemScans >= ModemOffTime Then 'if it's greater than the user define threshold then cycle the power and reset counters
+        CycleModem = True
+        ModemFail = True
+        ModemScans = 0
+      EndIf
+    EndIf
+  EndIf
+EndSub
+
+'Subroutine to get data from Pressure Sensor
+Sub GetPS1
+  Select Case PS1Port
+  Case 3 'if PS1 plugged into port C3
+    SDI12Recorder (PS1(),PS1Com3,PS1Addr,"M!",1.0,0,0)
+  Case 5 'if it's plugged into port C5 (CR1000) or U5 (CR6)
+    SDI12Recorder (PS1(),PS1Com5,PS1Addr,"M!",1.0,0,0)
+  EndSelect
+  If PS1(1) = NAN Then 'if we get no data then
+    PS1DataIn = False
+  Else
+    PS1DataIn = True 'otherwise, tell user we have data coming in
+  EndIf
+EndSub
+
+Sub GetPS2
+  Select Case PS2Port
+  Case 3 'if PS2 is plugged into port C3
+    SDI12Recorder (PS2(),PS2Com3,PS2Addr,"M!",1.0,0,0)
+  Case 5 'if it's plugged into port C5
+    SDI12Recorder (PS2(),PS2Com5,PS2Addr,"M!",1.0,0,0)
+  EndSelect
+  If PS2(1) = NAN Then 'if we don't get data in then
+    PS2DataIn = False
+  Else
+    PS2DataIn = True 'otherwise, tell user we have data coming in
+  EndIf
+EndSub
+
+Sub DailySnCheck 'get serial numbers of pressure sensors every day
+  If IfTime (1435,1440,Min) Then 'at 5min before midnight
+    Select Case PS1Port
+    Case 3 'if PS1 is in C3
+      SDI12Recorder (PS1Sn,PS1Com3,PS1Addr,"I!",1.0,0) 'get sn from PS1
+      If PS1Sn <> InitialPS1SN Then 'if response doesn't match the last response then
+        NewPS1 = True 'there's a new sensor
+        InitialPS1SN = PS1Sn 'set new response to "initial"
+      Else
+        NewPS1 = False 'otherwise, there's not a new sensor
+      EndIf
+    Case 5 'if it's in C5
+      SDI12Recorder (PS1Sn,PS1Com5,PS1Addr,"I!",1.0,0)
+      If PS1Sn <> InitialPS1SN Then
+        NewPS1 = True
+        InitialPS1SN = PS1Sn
+      Else
+        NewPS1 = False
+      EndIf
+    EndSelect
+    Select Case PS2Port
+    Case 3 'if PS2 is in C3
+      SDI12Recorder (PS2Sn,PS2Com3,PS2Addr,"I!",1.0,0) 'get serial number from PS2
+      If PS2Sn <> InitialPS2SN Then 'if it doesn't match the previous response, then it's a new sensor
+        NewPS2 = True
+        InitialPS2SN = PS2Sn 'reset "initial" to use for the following serial number inquiry
+      Else
+        NewPS2 = False 'otherwise, it's not a new sensor
+      EndIf
+    Case 5 'if PS2 is in C5
+      SDI12Recorder (PS2Sn,PS2Com5,PS2Addr,"I!",1.0,0)
+      If PS2Sn <> InitialPS2SN Then
+        NewPS2 = True
+        InitialPS2SN = PS2Sn
+      Else
+        NewPS2 = False
+      EndIf
+    EndSelect
+  EndIf
+EndSub
+
+Sub GetSN 'Manual Serial Number Check
+    Select Case PS1Port
+    Case 3 'if PS1 is in C3
+      SDI12Recorder (PS1Sn,PS1Com3,PS1Addr,"I!",1.0,0) 'get sn from PS1
+      If PS1Sn <> InitialPS1SN Then 'if response doesn't match the last response then
+        NewPS1 = True 'there's a new sensor
+        InitialPS1SN = PS1Sn 'set new response to "initial"
+      Else
+        NewPS1 = False 'otherwise, there's not a new sensor
+      EndIf
+    Case 5 'if it's in C5
+      SDI12Recorder (PS1Sn,PS1Com5,PS1Addr,"I!",1.0,0)
+      If PS1Sn <> InitialPS1SN Then
+        NewPS1 = True
+        InitialPS1SN = PS1Sn
+      Else
+        NewPS1 = False
+      EndIf
+    EndSelect
+    Select Case PS2Port
+    Case 3 'if PS2 is in C3
+      SDI12Recorder (PS2Sn,PS2Com3,PS2Addr,"I!",1.0,0) 'get serial number from PS2
+      If PS2Sn <> InitialPS2SN Then 'if it doesn't match the previous response, then it's a new sensor
+        NewPS2 = True
+        InitialPS2SN = PS2Sn 'reset "initial" to use for the following serial number inquiry
+      Else
+        NewPS2 = False 'otherwise, it's not a new sensor
+      EndIf
+    Case 5 'if PS2 is in C5
+      SDI12Recorder (PS2Sn,PS2Com5,PS2Addr,"I!",1.0,0)
+      If PS2Sn <> InitialPS2SN Then
+        NewPS2 = True
+        InitialPS2SN = PS2Sn
+      Else
+        NewPS2 = False
+      EndIf
+    EndSelect
+EndSub
+
+'Subroutine to get corrected stage
+Sub GetStage
+  Call GetPS1 'Get SDI12 data from PS1
+  PS1Stage=PS1(1)+PS1Offset 'compute stage from SDI12 data and offset
+  Call GetPS2 'Get SDI12 data from PS2
+  PS2Stage=PS2(1)+PS2Offset
+EndSub
+
+'Calculate offsets from TrueStage values when they are entered in the field
+Sub TrueStage
+  Call GetPS1 'Get SDI12 data from PS1
+  Call GetPS2 'Get SDI12 data from PS2
+  If TruePS1Stage <> BadDataIndicator Then 'if "TruePS1Stage" is changed from NAN
+    PS1Offset=TruePS1Stage-PS1(1) 'calculate offset from True Stage and SDI12 value
+  EndIf
+  If TruePS2Stage <> BadDataIndicator Then 'if "TruePS2Stage" is changed from NAN
+    PS2Offset=TruePS2Stage-PS2(1) 'calculate offset from True Stage and SDI12 value
+  EndIf
+EndSub
+
+Sub GetOtherStage 'Used to get stage from second datalogger
+  If IsSlave = True Then 'if this is the slave logger, exit subroutine
+    ExitSub
+  Else
+    GetVariables (GetVarResult,SlaveCom,0,SlavePBAddr,0000,0,"Public","PS1Stage",Logger2Stage,1) 'otherwise, get the "PS1Stage" variable from the slave logger's public table and store it in master's "Logger2Stage"
+  EndIf
+EndSub
+
+Sub CalcStageDiff 'calculate the difference in stage between the two logger's
+  If IsSlave = True Then 'if it's the slave, exit the subroutine
+    ExitSub
+  Else
+    StageDiff = PS1Stage - Logger2Stage 'otherwise, calculate difference between master's PS1stage and logger2stage
+    If StageDiff > 0 Then 'if the difference is positive
+      DWSHigher = False 'then shipping channel stage is higher
+      StageEven= False 'stages are not equal
+    EndIf
+    If StageDiff < 0 Then 'if the difference is negative
+      DWSHigher = True 'then the shipping channel stage is not higher
+      StageEven = False 'and the stages are not equal
+    EndIf
+    If StageDiff = 0 Then 'if there is no difference
+      StageEven = True 'the stages are equal
+      DWSHigher = False 'shipping channel is not higher.
+    EndIf
+  EndIf
+EndSub
+
+Sub GetRealTime 'get datalogger's real time
+  RealTime (rTime()) 'parse into array
+  RealSeconds = (Hour * 3600) + (Minute * 60) + Second 'what's the datalogger's time in seconds?
+  Mod5Min = RealSeconds MOD 300
+  Mod15Min = RealSeconds MOD 900
+  Mod60Min = RealSeconds MOD 3600
+  ModDay = RealSeconds MOD 86400
+EndSub
+
+Sub TableTriggers 'trigger datatables when necessary
+  If Mod15Min < 15 Then 'if it's on the 15min mark within 14 seconds
+    Rec15MinFlag = True 'trigger to write to dataout table
+    RecDataFlag = True
+  Else
+    Rec15MinFlag = False
+  EndIf
+  If (Mod15Min < 35) AND (RecDataFlag = False) Then 'if it missed the first trigger, try again
+    Rec15MinFlag = True
+    RecDataFlag = False
+  EndIf
+  If Mod15Min > 35 Then RecDataFlag = False 'if it's outside 35seconds of the 15min mark, don't write to the table
+  If ModDay < 15 Then 'if it's within 15sec of midnight
+    Rec24hrFlag = True 'trigger to write to the QAQC table
+  Else
+    Rec24hrFlag = False
+  EndIf
+EndSub
+
+  'Store Variables to USR File (preserve variables)
+  '--------------------------------------------------
+  Sub StoreVariables
+    'store variables out
+    Dim Var(8) As String
+    Public SendVarString As String * 500
+    Public VarStringLen As Long
+    Public VarHandle = Long
+    Public Varbytes = Long
+    Public StoreCloseErr As Long
+    Dim VarCnt As Long
+    Var(1) = PS1Port
+    Var(2) = PS1Addr
+    Var(3) = PS2Port
+    Var(4) = PS2Addr
+    Var(5) = PS1Offset
+    Var(6) = PS2Offset
+    Var(7) = IsSlave
+    Var(8) = KeepModemOn
+    'build send string
+    SendVarString = Var(1)
+    For VarCnt = 2 To 8
+      SendVarString = SendVarString + "," + Var(VarCnt)
+    Next VarCnt
+    VarStringLen = Len(SendVarString)
+    VarHandle = FileOpen("USR:VariableStore.txt","w",0)
+    Delay(1,100,mSec)
+    Varbytes = FileWrite(VarHandle,SendVarString,VarStringLen + 50)
+    StoreCloseErr = FileClose(VarHandle)
+    StoreVariablesFlg = False
+  EndSub
+
+  Sub ReadVariables
+    Public PreserveHandle As Long
+    Public PreserveFileLen As Long
+    Public Closeerror
+    PreserveHandle = FileOpen("USR:VariableStore.txt","r",0) 'open the preserve variable file here
+    Delay (1,30,mSec)
+    PreserveFileLen = FileRead(PreserveHandle,PreserveFile,500)
+    Closeerror = FileClose(PreserveHandle)
+    If PreserveFileLen = 0 Then
+      '    'set error txt
+      ExitSub
+    EndIf
+    Dim InVar(8) As String
+    SplitStr(InVar,PreserveFile,",",8,0)
+    PS1Port = InVar(1)
+    PS1Addr = InVar(2)
+    PS2Port = InVar(3)
+    PS2Addr = InVar(4)
+    PS1Offset = InVar(5)
+    PS2Offset = InVar(6)
+    IsSlave = InVar(7)
+    KeepModemOn = InVar(8)
+  EndSub
+'Main Program
+BeginProg
+  Call Initialize
+  Call GetSn
+  Scan (60,Sec,0,0)
+    If GetVariablesFlag = True Then
+      Call ReadVariables
+      GetVariablesFlag = False
+      StoreVariablesFlg = True
+    EndIf
+    Battery (CRVolts)
+    PanelTemp (LoggerTemp,_60Hz)
+    Call TrueStage
+    Call GetStage
+    Call GetOtherStage
+    Call CalcStageDiff
+    Call DailySnCheck
+    Call ModemCheck
+    Call ModemTimer
+    Call CycleModemPwr
+    Call GetRealTime
+    Call TableTriggers
+    CallTable SVMAQ
+    CallTable DataOut
+    CallTable QAQC
+    If Tech <> "" OR VisitReason <> "" OR TruePS1Stage <> NAN OR TruePS2Stage <> NAN OR CycleModem <> False Then 'if a tech changed anything at the station
+      CallTable SiteVisit 'write to the sitevisit table
+      Call GetSn
+      Delay (0,200,mSec)
+      Tech = "" 'reset back to null and NAN values
+      VisitReason = ""
+      TruePS1Stage=BadDataIndicator
+      TruePS2Stage=BadDataIndicator
+    EndIf
+    If IfTime (3,1440,Min) OR StoreVariablesFlg = True Then
+      Call StoreVariables 'store variables in USR file 3 minutes after midnight.
+    EndIf
+  NextScan
+EndProg
