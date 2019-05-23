@@ -16,12 +16,15 @@
 
 Const ProgVers = 2.1
 
-SetStatus ("USRDriveSize",250)
-PreserveVariables
-SequentialMode
-'Declare Constants
-Const BadDataIndicator = NAN
+SetStatus ("USRDriveSize",250) 'Create a partitioned drive on the logger to store parameters and reload them appropriately if there's a power issue/reboot
+PreserveVariables 'Used to store keep variable values in case of outage, found this wasn't working quite right, hence, we use the USR drive to do a similar function
+SequentialMode 'Force datalogger to read line by line
 
+'Declare Constants
+Const BadDataIndicator = NAN 'Make "BadDataIndicator" = NAN for later programming's sake
+
+'The following constant allows the user to select which mode of communication should be used between the two different dataloggers
+'Options are: Radio telemetered (ComRF), or hardwired via RS232 port or CS I/O port (ComSDC7)
 'Start of Constants Customization Section
 Const SlaveCom = ComRF
 'value = ComRS232
@@ -30,7 +33,7 @@ Const SlaveCom = ComRF
 'End of Constants Customization Section
 
 
-#If LoggerType = CR6 Then
+#If LoggerType = CR6 Then 'Depending which logger we're using set each port name to account for the logger's port name
 Const  PS1Com3 = C3
 Const  PS1Com5 = U5
 Const  PS2Com3 = C3
@@ -42,6 +45,7 @@ Const  PS1Com5 = 5
 Const  PS2Com3 = 3
 Const  PS2Com5 = 5
 #EndIf
+
 'Declare Public Variables
 Public SiteID As String * 8 'USGS Acronym
 Public SiteNum As String * 18 'USGS assigned station number
@@ -52,7 +56,7 @@ Public PS1Stage As Float 'Calculated Stage from pressure sensor 1
 Public PS2Stage As Float 'Calculated stage from pressure sensor 2
 Public Logger2Stage As Float 'stage from the slave datalogger
 Public StageDiff As Float 'difference between master and slave datalogger's stage
-Public DWSHigher As Boolean 'is the shipping channel at higher stage?
+Public DWSHigher As Boolean 'is the deep water shipping channel at higher stage than the Sac River?
 Public StageEven As Boolean 'are the stages even?
 Public PS1Offset As Float 'Calculated offset between PS1 raw data and actual river stage
 Public PS2Offset As Float 'calculated offset between PS2 raw data and actual river stage
@@ -67,11 +71,11 @@ Public PS2Addr As Float 'SDI12 address of PS2
 Public PS1DataIn As Boolean 'are data coming in from PS1?
 Public PS2DataIn As Boolean 'Are data coming in from PS2?
 Public PS1(2) As Float 'Array to hold raw PS1 data
-Alias PS1(1) = PS1RawDepthFt
-Alias PS1(2) = PS1TempC
+Alias PS1(1) = PS1RawDepthFt 'actual depth of the primary sensor within the water column
+Alias PS1(2) = PS1TempC 'temperature of the sensor
 Public PS2(2) As Float 'Array to hold raw PS2 data
-Alias PS2(1) = PS2RawDepthFt
-Alias PS2(2) = PS2TempC
+Alias PS2(1) = PS2RawDepthFt 'actualy depth of the secondary sensor within the water column
+Alias PS2(2) = PS2TempC 'temperature of the sensor
 Public PS1Sn As String * 35 'Serial number of PS1
 Public PS2Sn As String * 35 'Serial Number of PS2
 Dim InitialPS1SN As String * 35 'Used to trigger a flag if PS1 has been changed
@@ -86,17 +90,17 @@ Public ModemWorks As Boolean 'Is the modem successfully communicating to server?
 Dim ModemScans As Float 'how many times has the modem not been able to communicate to server?
 Dim ModemFail As Boolean 'has the modem failed based on how many times it's scanned?
 Public ModemOffTime As Float 'number of "scans" before the modem is considered failed
-Public IsNClosed As Boolean 'is there a normally closed relay in the system?
-Dim LoggernetAddr As Float 'echo of the neighbor pakbus address, used to know whether the modem is communicating appropriately
-Public LoggernetServer As Float 'used enterable value for the "server" pakbus address
+Public IsNClosed As Boolean 'is there a normally closed relay in the modem system?
+Dim LoggernetAddr As Float 'echo of the neighbor pakbus address, used to know whether the modem is communicating with the server appropriately
+Public LoggernetServer As Float 'user enterable value for the "server" pakbus address
 Public IsSlave As Boolean 'is this the slave logger in the network?
-Public SlavePBAddr As Float
+Public SlavePBAddr As Float 'PakBus address of the slave logger
 
 
 Public GetVarResult As Float 'was the "GetVariables" instruction successful?
-Public StoreVariablesFlg As Boolean
-Public PreserveFile As String * 200
-Public GetVariablesFlag As Boolean
+Public StoreVariablesFlg As Boolean 'flag to tell the datalogger to store the parameters in the USR drive
+Public PreserveFile As String * 200 'String variable used to write the file
+Public GetVariablesFlag As Boolean 'Flag to tell the logger to access the USR drive and retrieve/reload the most recent parameters after an outage
 
 Dim rTime(9) 'array to hold real time datalogger values
 Alias rTime(3) = DOM 'alias for Day of Month
@@ -117,17 +121,16 @@ Dim RecDataFlag As Boolean 'used to retry 15min table if it had been missed
 
 'Define Data Tables.
 DataTable (DataOut,Rec15MinFlag,-1) '15min data table
-  OpenInterval
-  CardOut (0,17280)
-  Sample (1,SiteID,String)
-  Sample (1,SiteNum,String)
-  Average (1,PS1Stage,IEEE4,False)
-  Average (1,PS2Stage,IEEE4,False)
-  Average (1,StageDiff,IEEE4,False)
-  Sample (1,DWSHigher,String)
-  Sample (1,StageEven,String)
-  Minimum (1,CRVolts,FP2,False,False)
-  Average (1,LoggerTemp,FP2,False)
+  CardOut (0,17280) 'store each record on the backup memory card
+  Sample (1,SiteID,String) 'Store SiteID
+  Sample (1,SiteNum,String) 'Store SiteNumber
+  Average (1,PS1Stage,IEEE4,False) 'Average primary stage of previous 15min
+  Average (1,PS2Stage,IEEE4,False) 'Average secondary stage of previous 15min
+  Average (1,StageDiff,IEEE4,False) 'Average difference in stage between the two gages
+  Sample (1,DWSHigher,String) 'is the Shipping channel a higher Stage? (True or False (-1 or 0))
+  Sample (1,StageEven,String) 'are both stages exactly even
+  Minimum (1,CRVolts,FP2,False,False) 'minimum station voltage of previous 15min
+  Average (1,LoggerTemp,FP2,False) 'average logger temp
 EndTable
 
 DataTable (QAQC,Rec24hrFlag,-1) 'QAQC table, recorded every night at midnight
@@ -138,12 +141,12 @@ DataTable (QAQC,Rec24hrFlag,-1) 'QAQC table, recorded every night at midnight
   Sample (1,LoggerTemp,FP2)
   Sample (1,PS1Stage,IEEE4)
   Sample (1,PS2Stage,IEEE4)
-  Sample (1,PS1Offset,IEEE4)
-  Sample (1,PS2Offset,IEEE4)
-  Sample (1,PS1Sn,String)
-  Sample (1,PS2Sn,String)
-  Sample (1,NewPS1,String)
-  Sample (1,NewPS2,String)
+  Sample (1,PS1Offset,IEEE4) 'primary stage sensor offset between depth in water column and water level
+  Sample (1,PS2Offset,IEEE4) 'secondary stage sensor offset between depth in water column and water level
+  Sample (1,PS1Sn,String) 'primary sensor serial number
+  Sample (1,PS2Sn,String) 'secondary sensor serial number
+  Sample (1,NewPS1,String) 'Is there a new primary sensor?
+  Sample (1,NewPS2,String) 'is there a new secondary sensor?
   Sample (1,DWSHigher,String)
   Sample (1,StageEven,String)
 EndTable
@@ -164,8 +167,8 @@ DataTable (SiteVisit,True,-1) 'SiteVisit, recorded whenever a tech makes a chang
   Sample (1,NewPS2,String)
   Sample (1,DWSHigher,String)
   Sample (1,StageEven,String)
-  Sample (1,Tech,String)
-  Sample (1,VisitReason,String)
+  Sample (1,Tech,String) 'tech's initials who made visit/change
+  Sample (1,VisitReason,String) 'why was the visit performed
 EndTable
 
 DataTable (SVMAQ,True,1) 'Table to provide easy reference to values needed for SVMAQ field sheets
@@ -183,26 +186,26 @@ EndTable
 Sub Initialize 'Set up station parameters
   SiteID = "CM79"
   SiteNum = BadDataIndicator
-  PS1() = NAN
+  PS1() = NAN 'start the array as NAN and populate when data come in
   PS2() = NAN
-  PS1Port = 3
-  PS1Addr = 0
-  PS2Port = 5
-  PS2Addr = 0
-  TruePS1Stage = NAN
-  TruePS2Stage = NAN
-  IsNClosed = False
-  HasModem = False
-  KeepModemOn = False
-  LoggernetServer = 4094
-  ModemOffTime = 240
-  IsSlave = True
-  SlavePBAddr = 3
-  GetVariablesFlag = True
+  PS1Port = 3 'set the port that the primary sensor is plugged into.
+  PS1Addr = 0 'Primary sensor's SDI12 address
+  PS2Port = 5 'set the port that the secondary sensor is plugged into.
+  PS2Addr = 0 'Secondary sensor's SDI12 address
+  TruePS1Stage = NAN 'Keep as NAN until tech enters the staff plate reading
+  TruePS2Stage = NAN 'Keep as NAN until tech enters the staff plate reading
+  IsNClosed = False 'Is there a normally closed relay in the modem's circuit?
+  HasModem = False 'does the datalogger have a modem hooked up to it?
+  KeepModemOn = False 'should we keep the modem on 24/7
+  LoggernetServer = 4094 'Server's PakBus address
+  ModemOffTime = 240 'How long can the modem fail to communicate to server before cycling power to it
+  IsSlave = True 'is this the slave logger in the network
+  SlavePBAddr = 3 'what is the Pakbus address of the slave
+  GetVariablesFlag = True 'force the logger to get parameters from USR drive if there's an outage
 EndSub
 
 Sub ModemTimer 'used to turn modem on or off based on "KeepModemOn" variable
-  If IsSlave = True OR HasModem = False Then ExitSub
+  If IsSlave = True OR HasModem = False Then ExitSub 'leave subroutine if no modem or is the slave in the network
   Select Case IsNClosed
   Case True 'a normally closed relay is present
     If KeepModemOn = True Then 'keep the modem on 24/7
@@ -265,7 +268,7 @@ Sub ModemTimer 'used to turn modem on or off based on "KeepModemOn" variable
   EndSelect
 EndSub
 
-Sub CycleModemPwr
+Sub CycleModemPwr 'cycle the power to the modem
   If IsSlave = True OR HasModem = False Then ExitSub
   If CycleModem = False Then 'if modem power doesn't need to be cycled, exit subroutine
     ExitSub
@@ -314,21 +317,22 @@ Sub ModemCheck 'Check to see if modem is working properly
   EndIf
 EndSub
 
-'Subroutine to get data from Pressure Sensor
+'Subroutine to get data from Pressure Sensor 1
 Sub GetPS1
   Select Case PS1Port
   Case 3 'if PS1 plugged into port C3
-    SDI12Recorder (PS1(),PS1Com3,PS1Addr,"M!",1.0,0,0)
+    SDI12Recorder (PS1(),PS1Com3,PS1Addr,"M!",1.0,0,0)'tell logger to fill the "PS1()" array by sending "M!" to port 3, and the address, 1.0 multiplier, 0 offset. First value is depth, second is tempC
   Case 5 'if it's plugged into port C5 (CR1000) or U5 (CR6)
     SDI12Recorder (PS1(),PS1Com5,PS1Addr,"M!",1.0,0,0)
   EndSelect
-  If PS1(1) = NAN Then 'if we get no data then
+  If PS1(1) = NAN Then 'if we get no data in the first variable in the array then
     PS1DataIn = False
   Else
     PS1DataIn = True 'otherwise, tell user we have data coming in
   EndIf
 EndSub
 
+'Subroutine to get data from Pressure Sensor 2
 Sub GetPS2
   Select Case PS2Port
   Case 3 'if PS2 is plugged into port C3
@@ -503,14 +507,14 @@ EndSub
   '--------------------------------------------------
   Sub StoreVariables
     'store variables out
-    Dim Var(8) As String
-    Public SendVarString As String * 500
-    Public VarStringLen As Long
+    Dim Var(8) As String 'make array for variables
+    Public SendVarString As String * 500 'make a string long enough for all variables, comma delimited
+    Public VarStringLen As Long 'how long is the string
     Public VarHandle = Long
     Public Varbytes = Long
     Public StoreCloseErr As Long
     Dim VarCnt As Long
-    Var(1) = PS1Port
+    Var(1) = PS1Port 'set each Var() to a parameter
     Var(2) = PS1Addr
     Var(3) = PS2Port
     Var(4) = PS2Addr
@@ -519,33 +523,33 @@ EndSub
     Var(7) = IsSlave
     Var(8) = KeepModemOn
     'build send string
-    SendVarString = Var(1)
-    For VarCnt = 2 To 8
-      SendVarString = SendVarString + "," + Var(VarCnt)
-    Next VarCnt
-    VarStringLen = Len(SendVarString)
-    VarHandle = FileOpen("USR:VariableStore.txt","w",0)
-    Delay(1,100,mSec)
-    Varbytes = FileWrite(VarHandle,SendVarString,VarStringLen + 50)
-    StoreCloseErr = FileClose(VarHandle)
-    StoreVariablesFlg = False
+    SendVarString = Var(1) 'start building string
+    For VarCnt = 2 To 8 'from variable counter 2 to 8 do the following loop
+      SendVarString = SendVarString + "," + Var(VarCnt) 'add the next variable into the string
+    Next VarCnt 'go to the next variable
+    VarStringLen = Len(SendVarString) 'return the length of the string in bytes
+    VarHandle = FileOpen("USR:VariableStore.txt","w",0) 'create a .txt file in the USR drive
+    Delay(1,100,mSec) 'delay to make sure the file got created
+    Varbytes = FileWrite(VarHandle,SendVarString,VarStringLen + 50) 'write the string into the new file, adding 50 bytes to the string length so ensure plenty of space
+    StoreCloseErr = FileClose(VarHandle) 'close the file
+    StoreVariablesFlg = False 'set flag back to false
   EndSub
 
-  Sub ReadVariables
+  Sub ReadVariables 'read the USR file in and repopulate variables appropriately
     Public PreserveHandle As Long
     Public PreserveFileLen As Long
     Public Closeerror
     PreserveHandle = FileOpen("USR:VariableStore.txt","r",0) 'open the preserve variable file here
     Delay (1,30,mSec)
-    PreserveFileLen = FileRead(PreserveHandle,PreserveFile,500)
-    Closeerror = FileClose(PreserveHandle)
-    If PreserveFileLen = 0 Then
+    PreserveFileLen = FileRead(PreserveHandle,PreserveFile,500) 'read the file in and assign to a variable
+    Closeerror = FileClose(PreserveHandle) 'close the file
+    If PreserveFileLen = 0 Then 'if there's no file then exit the subroutine
       '    'set error txt
       ExitSub
     EndIf
-    Dim InVar(8) As String
-    SplitStr(InVar,PreserveFile,",",8,0)
-    PS1Port = InVar(1)
+    Dim InVar(8) As String 'make array to store incoming variables
+    SplitStr(InVar,PreserveFile,",",8,0) 'split the string using comma delimiter
+    PS1Port = InVar(1) 'assign each variable to the correct parameter
     PS1Addr = InVar(2)
     PS2Port = InVar(3)
     PS2Addr = InVar(4)
@@ -555,18 +559,18 @@ EndSub
     KeepModemOn = InVar(8)
   EndSub
 'Main Program
-BeginProg
+BeginProg 'after all subroutines are declared, begin the program
   Call Initialize
   Call GetSn
-  Scan (60,Sec,0,0)
-    If GetVariablesFlag = True Then
-      Call ReadVariables
+  Scan (60,Sec,0,0) 'set scan interval to 60seconds
+    If GetVariablesFlag = True Then 'if we need to get variables from USR drive
+      Call ReadVariables 'call the subroutine to run
       GetVariablesFlag = False
       StoreVariablesFlg = True
     EndIf
-    Battery (CRVolts)
-    PanelTemp (LoggerTemp,_60Hz)
-    Call TrueStage
+    Battery (CRVolts) 'check station battery voltage
+    PanelTemp (LoggerTemp,_60Hz) 'get the data logger temp, filtering out 60Hz noise
+    Call TrueStage 'call all above subroutines in logical order
     Call GetStage
     Call GetOtherStage
     Call CalcStageDiff
@@ -576,12 +580,12 @@ BeginProg
     Call CycleModemPwr
     Call GetRealTime
     Call TableTriggers
-    CallTable SVMAQ
+    CallTable SVMAQ 'call data tables, they only write a new record if the timing flags are met
     CallTable DataOut
     CallTable QAQC
     If Tech <> "" OR VisitReason <> "" OR TruePS1Stage <> NAN OR TruePS2Stage <> NAN OR CycleModem <> False Then 'if a tech changed anything at the station
       CallTable SiteVisit 'write to the sitevisit table
-      Call GetSn
+      Call GetSn 'get the serial number of each sensor and flag it if it's a new sensor
       Delay (0,200,mSec)
       Tech = "" 'reset back to null and NAN values
       VisitReason = ""
@@ -591,5 +595,5 @@ BeginProg
     If IfTime (3,1440,Min) OR StoreVariablesFlg = True Then
       Call StoreVariables 'store variables in USR file 3 minutes after midnight.
     EndIf
-  NextScan
+  NextScan 'return to top of scan and start again, waiting until the top of the minute.
 EndProg
