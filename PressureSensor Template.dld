@@ -184,14 +184,16 @@ EndTable
 'Define Subroutines
 'Subroutine to initialize variables
 Sub Initialize 'Set up station parameters
-  SiteID = "CM79"
-  SiteNum = BadDataIndicator
+  SiteID = "DWS_LK"
+  SiteNum = 11447605
   PS1() = NAN 'start the array as NAN and populate when data come in
   PS2() = NAN
   PS1Port = 3 'set the port that the primary sensor is plugged into.
   PS1Addr = 0 'Primary sensor's SDI12 address
   PS2Port = 5 'set the port that the secondary sensor is plugged into.
   PS2Addr = 0 'Secondary sensor's SDI12 address
+  PS1Offset = -0.572 'set stage offsets, if known
+  PS2Offset = 0
   TruePS1Stage = NAN 'Keep as NAN until tech enters the staff plate reading
   TruePS2Stage = NAN 'Keep as NAN until tech enters the staff plate reading
   IsNClosed = False 'Is there a normally closed relay in the modem's circuit?
